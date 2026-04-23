@@ -1,6 +1,6 @@
+
 """
 MSK-IMPACT 50k → Survival GAN Cleaning Pipeline
-================================================
 
 CHANGES vs previous version (2026-04):
   1. PRESERVE INTEGER DTYPE. After SimpleImputer's median imputation, columns
@@ -368,6 +368,7 @@ print("  data sets/survival_gan_test.csv   (held out for downstream eval)")
 print(f"\nFinal columns ({len(df_train.columns)}): {df_train.columns.tolist()}")
 
 
+# ── 10. WRITE COLUMN METADATA JSON
 # ── 10. WRITE COLUMN METADATA JSON ───────────────────────────────────────  (NEW)
 # This file is consumed by train_survGAN_aws.py to enforce physical
 # constraints on synthetic output (clip to bounds, cast integers).
