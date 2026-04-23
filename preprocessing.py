@@ -1,4 +1,36 @@
 
+"""
+MSK-IMPACT 50k → Survival GAN Cleaning Pipeline
+
+CHANGES vs previous version (2026-04):
+  1. PRESERVE INTEGER DTYPE. After SimpleImputer's median imputation, columns
+     that were integer-valued in the raw data (Mutation Count, Sample coverage,
+     Number of Other Cancer Types, Age at Diagnosis) are rounded and cast back
+     to int64. Previously they silently became float64, which caused the
+     downstream precision-match in train_survGAN_aws.py to fail (its integer
+     restoration checks `np.issubdtype(real.dtype, np.integer)`, which is
+     False for float64). Result in the old pipeline: synthetic Mutation Count
+     values like `2.4631227` instead of `2`, and *all* 34938 synthetic rows
+     failed the integer check.
+
+  2. CLIP PATHOLOGIST PURITY TO [0, 100] BEFORE IMPUTATION. The raw column
+     has a data-entry artefact (max value 9000, clearly meant to be 90).
+     Without clipping, this single outlier inflated the median imputation and
+     the BayesianGMM fit, causing the synthetic column to run up to 9997.
+     We now clip to its semantic range [0, 100] percent.
+
+  3. WRITE metadata JSON alongside the CSVs. It records:
+       - which columns are integer-valued
+       - per-column min/max bounds for clipping at generation time
+     `train_survGAN_aws.py` reads this file to enforce physical constraints
+     on the synthetic output.
+
+  4. Previously-existing changes retained:
+     - 80/20 train/test split (no val — GANs have no val-loss early stopping).
+     - Drop high-cardinality HLA + Primary Site columns before encoding.
+     - Bucket Cancer Type to top-15 + "Other".
+     - Patient-level de-duplication; leakage-safe imputation fit on train only.
+"""
 import json
 from pathlib import Path
 
@@ -109,6 +141,9 @@ if "Cancer Type" in df_train.columns:
 # ── 4c. CLIP PATHOLOGIST PURITY TO ITS SEMANTIC RANGE [0, 100] ──────────────  (NEW)
 # Pathologist Estimated Tumor Purity is a percentage. The raw column contains
 # at least one value of 9000 (almost certainly a data-entry error for 90).
+# Without this clip, the outlier inflates the median imputation and the
+# BayesianGMM fit downstream, producing synthetic values up to 9997.
+#
 # Done BEFORE imputation so that the outlier doesn't poison the median either.
 # Applied to both splits independently — this is a semantic bound, not a
 # learned parameter, so there's no leakage.
@@ -314,6 +349,7 @@ for col in cat_cols:
     print(f"  Label encoded '{col}' → {len(le.classes_)} classes")
 
 
+# ── 8. FINAL QC ───────────────────────────────────────────────────────────────
 print("\n── Final QC ──")
 for name, split in [("train", df_train), ("test", df_test)]:
     assert split.isnull().sum().sum() == 0,       f"{name}: NaNs remaining!"
@@ -333,6 +369,23 @@ print(f"\nFinal columns ({len(df_train.columns)}): {df_train.columns.tolist()}")
 
 
 # ── 10. WRITE COLUMN METADATA JSON
+# ── 10. WRITE COLUMN METADATA JSON ───────────────────────────────────────  (NEW)
+# This file is consumed by train_survGAN_aws.py to enforce physical
+# constraints on synthetic output (clip to bounds, cast integers).
+#
+# Per column:
+#   - "dtype":    "int"  or  "float"
+#   - "bounds":   [lo, hi]  (either may be null if unbounded on that side)
+#
+# Integer columns: round + cast synthetic values to int, then clip.
+# Bounded columns: clip synthetic values to [lo, hi].
+#
+# The bounds are a combination of:
+#   - Training-data [min, max] (always recorded)
+#   - Semantic bounds for fields with known physical meaning (override)
+# Semantic bounds are stricter where applicable and prevent the GAN from
+# generating biologically impossible values like negative mutation counts
+# or genome fractions > 1.
 
 def _col_bounds(df_train, col, semantic=None):
     """Return the tighter of (observed min, observed max) and semantic bounds."""
